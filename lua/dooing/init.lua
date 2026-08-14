@@ -5,6 +5,7 @@ local state = require("dooing.state")
 
 function M.setup(opts)
 	config.setup(opts)
+	require("dooing.hooks").reset()
 	state.load_todos()
 
 	-- Check for due items on startup and notify
