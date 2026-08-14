@@ -17,6 +17,8 @@ Table of Contents                                          *dooing-contents*
   - Calendar                                                 |dooing-calendar|
   - Priority System                                         |dooing-priorities|
   - Import/Export                                             |dooing-import|
+  - Timewarrior                                           |dooing-timewarrior|
+  - Custom Hooks                                                 |dooing-hooks|
 3. Colors                                                      |dooing-colors|
 
 ==============================================================================
@@ -38,6 +40,7 @@ FEATURES                                                      *dooing-features*
 - 🔍 Search and filter capabilities
 - 📤 Import/Export functionality
 - 🔄 Undo/Redo support for deleted todos
+- ⏱️ Timewarrior integration, see |dooing-timewarrior|
 
 REQUIREMENTS                                              *dooing-requirements*
 
@@ -371,6 +374,84 @@ Import and export todos using JSON format: >vim
     :Dooing export ~/todos.json
     :Dooing import ~/todos.json
 <
+
+TIMEWARRIOR                                             *dooing-timewarrior*
+
+Dooing can drive timewarrior (https://timewarrior.net) the way taskwarrior's
+`on-modify.timewarrior` hook does. It is off by default: >lua
+    require("dooing").setup({
+        timewarrior = { enabled = true },
+    })
+<
+The status cycle maps onto timewarrior's clock:
+
+    pending -> in progress      `timew start <tags>`
+    in progress -> done         `timew stop <tags>`
+    done -> pending             nothing
+    a tracked todo is deleted   `timew stop <tags>`
+
+Calls are asynchronous, so toggling never blocks the editor, and they are
+queued so timewarrior receives them in the order they happened.
+
+Tags~
+
+A todo `write the #timew integration #work` in a project `myproject` starts: >
+    timew start "write the integration" dooing myproject timew work
+<
+The description (the text with its `#tags` stripped) comes first as a single
+tag, followed by the fixed tags, the per-project list name and the todo's own
+tags. Full options: >lua
+    timewarrior = {
+        enabled = false,
+        command = "timew",          -- binary name or absolute path
+        tags = { "dooing" },        -- `false` adds no fixed tags at all
+        include_project = true,     -- tag with the per-project list name
+        include_hashtags = true,    -- add every #tag from the todo text
+        include_priorities = false, -- add every priority name as a tag
+        stop_on_delete = true,      -- stop the clock on delete
+        single_active = true,       -- keep at most one todo in progress
+    }
+<
+Note that `tags = {}` does not clear the default, because
+`vim.tbl_deep_extend()` merges lists by index; use `tags = false`.
+
+One task at a time~
+
+Timewarrior tracks a single open interval, so with `single_active = true` (the
+default) starting a todo stops any other in-progress todo, dropping it back to
+pending. With `single_active = false` several todos may be in progress, but
+timewarrior only tracks the one started last.
+
+Notes~
+
+- Closing the window or quitting Neovim does not stop the clock: the interval
+  belongs to timewarrior, not to the editor.
+- Editing a tracked todo's text does not re-tag its interval; dooing remembers
+  the tags it opened the interval with, but only for the current session.
+- Starting and finishing a todo within the same second records no interval —
+  timewarrior rejects a zero-length one, so dooing runs `timew cancel`.
+- Restoring a deleted todo with `u` does not restart its interval.
+
+CUSTOM HOOKS                                                   *dooing-hooks*
+
+The same status changes are available to your own configuration, whether or
+not the timewarrior integration is enabled: >lua
+    require("dooing").setup({
+        hooks = {
+            on_start = function(todo, context, reason)
+                -- reason is always "start"
+            end,
+            on_stop = function(todo, context, reason)
+                -- reason is "done", "switch" or "delete"
+            end,
+        },
+    })
+<
+`todo` is the todo table (see the fields in |dooing-configuration|), `context`
+is `{ project = <name|nil> }` — nil for the global list — and `reason` says why
+the todo stopped: it was completed, another todo replaced it because of
+`single_active` ("switch"), or it was deleted. Errors raised inside a hook are
+reported with |vim.notify()| and never interrupt the todo update.
 
 ==============================================================================
 3. Colors                                                      *dooing-colors*

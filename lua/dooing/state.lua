@@ -4,6 +4,7 @@ local vim = vim
 local M = {}
 local config = require("dooing.config")
 local utils = require("dooing.ui.utils")
+local hooks = require("dooing.hooks")
 
 -- Cache frequently accessed values
 local priority_weights = {}
@@ -325,22 +326,51 @@ function M.add_nested_todo(text, parent_index, priority_names)
 	return true
 end
 
+-- Context handed to the status hooks; `project` is nil for the global list
+local function hook_context()
+	local project = M.current_context
+	if project == "global" or project == "" then
+		project = nil
+	end
+	return { project = project }
+end
+
+-- Timewarrior keeps a single open interval, so when its integration asks for it,
+-- starting a todo stops every other todo that was still in progress
+local function stop_other_in_progress(index)
+	if not hooks.single_active() then
+		return
+	end
+
+	local context = hook_context()
+	for i, todo in ipairs(M.todos) do
+		if i ~= index and todo.in_progress then
+			todo.in_progress = false
+			hooks.on_stop(todo, context, "switch")
+		end
+	end
+end
+
 function M.toggle_todo(index)
-	if M.todos[index] then
+	local todo = M.todos[index]
+	if todo then
 		-- Cycle through states: pending -> in_progress -> done -> pending
-		if not M.todos[index].in_progress and not M.todos[index].done then
+		if not todo.in_progress and not todo.done then
 			-- From pending to in_progress
-			M.todos[index].in_progress = true
-		elseif M.todos[index].in_progress then
+			stop_other_in_progress(index)
+			todo.in_progress = true
+			hooks.on_start(todo, hook_context())
+		elseif todo.in_progress then
 			-- From in_progress to done
-			M.todos[index].in_progress = false
-			M.todos[index].done = true
+			todo.in_progress = false
+			todo.done = true
 			-- Track completion time
-			M.todos[index].completed_at = os.time()
+			todo.completed_at = os.time()
+			hooks.on_stop(todo, hook_context(), "done")
 		else
 			-- From done back to pending
-			M.todos[index].done = false
-			M.todos[index].completed_at = nil
+			todo.done = false
+			todo.completed_at = nil
 		end
 		save_todos()
 	end
@@ -1210,6 +1240,10 @@ end
 function M.delete_todo(index)
 	if M.todos[index] then
 		local todo = M.todos[index]
+		-- A tracked todo that disappears should not leave the clock running
+		if todo.in_progress then
+			hooks.on_stop(todo, hook_context(), "delete")
+		end
 		M.store_deleted_todo(todo, index)
 		table.remove(M.todos, index)
 		save_todos()
@@ -1223,6 +1257,11 @@ function M.delete_completed()
 
 	for i, todo in ipairs(M.todos) do
 		if todo.done then
+			-- Completing a todo already stopped its interval; imported data can
+			-- still carry both flags, so guard against a clock left running
+			if todo.in_progress then
+				hooks.on_stop(todo, hook_context(), "delete")
+			end
 			M.store_deleted_todo(todo, i - removed_count)
 			removed_count = removed_count + 1
 		else

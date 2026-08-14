@@ -18,6 +18,8 @@ lua/dooing/
 ├── init.lua               ← Entry point: setup(), user commands (:Dooing, :DooingLocal, :DooingDue), keymaps
 ├── config.lua             ← M.defaults + M.setup(opts) merges user config via vim.tbl_deep_extend
 ├── state.lua              ← Data layer: todo CRUD, persistence (JSON), sorting, filtering, undo, git detection
+├── hooks.lua              ← Status-change dispatch: fans `on_start`/`on_stop` out to the built-in integrations and `config.options.hooks`
+├── timewarrior.lua        ← Timewarrior integration: `timew start`/`stop` as todos change status
 ├── server.lua             ← QR code share server (raw TCP via vim.loop) — self-contained, rarely touched
 └── ui/
     ├── init.lua            ← UI coordinator: public API that delegates to sub-modules
@@ -45,7 +47,9 @@ ui/rendering.lua → ui/constants, ui/utils, ui/highlights, ui/modern, state, co
 ui/modern.lua → ui/highlights, ui/utils, ui/calendar, config
 ui/components.lua → ui/panels (modern only; classic implementations stay in place)
 ui/panels.lua → ui/constants, config, state
-state.lua → config (for save_path, priorities, nested_tasks settings)
+state.lua → config (for save_path, priorities, nested_tasks settings), hooks
+hooks.lua → config (for the user `hooks` table), timewarrior
+timewarrior.lua → config (only) — never state, so `state → hooks → timewarrior` stays acyclic
 ```
 
 All modules are singletons accessed via `require()`. No events or callback systems between modules.
@@ -74,6 +78,8 @@ Todos are stored as a **flat JSON array** in a single file (default: `vim.fn.std
 
 **Critical rule:** `state.lua` owns all data mutations. Always call `state.save_todos()` after modifying `state.todos`.
 
+No field records tracked time — the timewarrior integration keeps nothing in the JSON, so the timewarrior database stays the single source of truth for durations.
+
 ## Configuration Pattern
 
 - `config.lua` defines `M.defaults` with all default values
@@ -84,6 +90,7 @@ Todos are stored as a **flat JSON array** in a single file (default: `vim.fn.std
 - **Window size (`window.dimensions`):** may be a table `{ width = <n>, height = <n> }` **or** a function returning such a table (evaluated on every window creation, so sizes can adapt to `vim.o.columns` / `vim.o.lines`). Never read `config.options.window.dimensions` directly — call `config.get_window_dimensions()`, which resolves the function form, accepts positional `{ <w>, <h> }` tables, floors/clamps to the editor size, and falls back to `{ width = 55, height = 20 }` on invalid values
 - The legacy `window.width` / `window.height` options are deprecated: `M.setup()` folds user-supplied values into `window.dimensions` (with a `vim.notify` warning) and removes the legacy keys from `config.options.window`
 - **UI style (`ui.style`):** `"classic"` (default) or `"modern"`. Never read `config.options.ui.*` directly — use `config.is_modern()`, `config.modern_feature("<name>")` (which returns false whenever the style is not modern, so classic can never be affected by a sub-toggle), and `config.ui_icon("<name>")`
+- **List-valued options cannot be cleared with `{}`** — `vim.tbl_deep_extend` merges lists by index, so `timewarrior.tags = {}` keeps the default. Such options take `false` as their "none" value (`tags = false`); follow that pattern for any new list option
 
 ## Code Conventions
 
@@ -134,7 +141,12 @@ Todos are stored as a **flat JSON array** in a single file (default: `vim.fn.std
 - **`state.search_todos()` returns `lnum` = index into `state.todos`, not a buffer line.** Resolve it through `constants.line_to_todo` before moving the cursor.
 - **The calendar grid is driven by one `layout` table** (`pad`, `cell`, `num_off`, `header_rows`, `width`, `height`) chosen by style. Rendering, `get_cursor_position()`, `get_day_from_position()` and the highlight loop all derive their offsets from it — never hardcode the old `col * 3 + 2` / `row + 3` numbers again, or day selection silently maps to the wrong date.
 - **Folding differs per style.** Classic uses `foldmethod=indent`, which is inert at the default `shiftwidth=8` (indents 2 and 4 both yield level 0) — pre-existing behavior, left alone. Modern uses `foldmethod=expr` with `modern.foldexpr()`, reading `constants.fold_levels`; rows with children emit `">" .. level` so each parent gets its own fold.
-- **Duplicate function definitions in `state.lua`:** `delete_todo()` and `delete_completed()` are defined twice — the second definitions (near the bottom) override the first to add undo support. This is intentional.
+- **Duplicate function definitions in `state.lua`:** `delete_todo()` and `delete_completed()` are defined twice — the second definitions (near the bottom) override the first to add undo support. This is intentional. Anything hooking deletion belongs in the *second* pair; the first ones are dead code, and every UI delete path (including `delete_todo_with_confirmation()`) resolves `M.delete_todo` at call time.
+- **`state.toggle_todo()` is the only place `in_progress` is ever mutated**, which is what makes the status hooks a single choke point. A new path that flips `in_progress` must fire `hooks.on_start` / `hooks.on_stop` itself, or the timewarrior clock silently desyncs from the list.
+- **Status hooks must never block.** `timewarrior.lua` shells out through `vim.system()` and serializes calls in its own queue, because `single_active` fires a stop immediately followed by a start and `vim.system` gives no ordering guarantee between two calls in flight. Never "simplify" that to `io.popen`/`vim.fn.system`, and remember the `vim.system` callback runs in a fast event context — wrap anything user-facing in `vim.schedule()`.
+- **Timewarrior refuses two edge cases, both handled deliberately:** a `stop` whose tags don't match the open interval (so `start` tags are remembered per todo id and reused on stop, rather than rebuilt from possibly-edited text), and an interval whose start and end land in the same second (so a same-second stop runs `timew cancel` instead — otherwise the clock would stay open forever).
+- **A failed `timew stop` is normal** — the user may have stopped the clock from a shell — so stops report at `DEBUG` level while starts report at `ERROR`.
+- **`single_active` enforcement is gated on the integration being enabled**, so users without timewarrior keep the pre-existing behavior of several todos in progress at once. Any new gating predicate belongs in `hooks.lua` so `state.lua` keeps a single dependency.
 - **`---@diagnostic disable` lines** at the top of UI files suppress known warnings — don't remove them.
 - **`window.width` / `window.height` no longer exist at runtime** — they are migrated into `window.dimensions` during `config.setup()`. Any new code needing the window size must use `config.get_window_dimensions()` (consumers: `ui/window.lua`, `ui/rendering.lua`, `ui/due_notification.lua`).
 - **Git root detection** uses `io.popen("git rev-parse --show-toplevel")` — synchronous/blocking. Keep this in mind for performance.

@@ -110,6 +110,31 @@ M.defaults = {
 		on_startup = true,
 		on_open = true,
 	},
+	-- Timewarrior integration, the equivalent of taskwarrior's
+	-- `on-modify.timewarrior` hook: toggling a todo to in-progress runs
+	-- `timew start <tags>`, completing or deleting it runs `timew stop <tags>`
+	timewarrior = {
+		enabled = false,
+		command = "timew", -- binary name or absolute path
+		-- Tags added to every interval. Set to `false` to add none; an empty
+		-- table does not work because `vim.tbl_deep_extend` merges lists by index
+		tags = { "dooing" },
+		include_project = true, -- tag intervals with the per-project list name
+		include_hashtags = true, -- add every `#tag` found in the todo text
+		include_priorities = false, -- add every priority name as a tag
+		stop_on_delete = true, -- stop the clock when a tracked todo is deleted
+		-- Timewarrior tracks one interval at a time, so keep at most one todo
+		-- in progress: starting a second one stops the first
+		single_active = true,
+	},
+	-- Called whenever a todo starts or stops being in progress:
+	--   function(todo, context, reason)
+	-- `context` is `{ project = <string|nil> }`, `reason` is "start" for
+	-- `on_start` and "done" | "switch" | "delete" for `on_stop`
+	hooks = {
+		on_start = nil,
+		on_stop = nil,
+	},
 	save_path = vim.fn.stdpath("data") .. "/dooing_todos.json",
 	pretty_print_json = false,
 	per_project = {

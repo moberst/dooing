@@ -18,6 +18,7 @@ Dooing is a minimalist todo list manager for Neovim, designed with simplicity an
 - 📂 **Per-project todos** with git integration
 - 🔔 **Smart due date notifications** on startup and when opening todos
 - 📅 **Due items window** to view and jump to all due tasks
+- ⏱️ **Timewarrior integration** that starts and stops the clock as todos move
 
 ---
 
@@ -163,6 +164,24 @@ Dooing comes with sensible defaults that you can override:
         enabled = true,                        -- Enable due date notifications
         on_startup = true,                    -- Show notification on Neovim startup
         on_open = true,                       -- Show notification when opening todos
+    },
+
+    -- Timewarrior integration (see "Timewarrior Integration" below)
+    timewarrior = {
+        enabled = false,                       -- Off by default
+        command = "timew",                     -- Binary name or absolute path
+        tags = { "dooing" },                   -- Tags added to every interval (or `false`)
+        include_project = true,                -- Tag intervals with the project name
+        include_hashtags = true,               -- Add every #tag from the todo text
+        include_priorities = false,            -- Add every priority name as a tag
+        stop_on_delete = true,                 -- Stop the clock when a tracked todo is deleted
+        single_active = true,                  -- Keep at most one todo in progress
+    },
+
+    -- Called when a todo starts/stops being in progress: function(todo, context, reason)
+    hooks = {
+        on_start = nil,
+        on_stop = nil,
     },
 
     -- Keymaps
@@ -508,6 +527,110 @@ To disable notifications entirely:
 due_notifications = {
     enabled = false,
 }
+```
+
+---
+
+## ⏱️ Timewarrior Integration
+
+Dooing can drive [timewarrior](https://timewarrior.net) the way taskwarrior's
+`on-modify.timewarrior` hook does, so time spent on a todo lands in the same
+timewarrior database as the rest of your tracking. It is **off by default**:
+
+```lua
+require("dooing").setup({
+    timewarrior = { enabled = true },
+})
+```
+
+### How it works
+
+Dooing's status cycle maps onto timewarrior's clock:
+
+| Toggle (`x`) | Timewarrior |
+|--------------|-------------|
+| pending → in progress | `timew start <tags>` |
+| in progress → done | `timew stop <tags>` |
+| done → pending | nothing |
+| a tracked todo is deleted | `timew stop <tags>` |
+
+Every call is asynchronous, so toggling a todo never blocks the editor, and calls
+are queued so they always reach timewarrior in the order they happened.
+
+### Tags
+
+A todo like `write the #timew integration #work` in a project called `myproject`
+starts this interval:
+
+```
+timew start "write the integration" dooing myproject timew work
+```
+
+- the **description** — the todo text with its `#tags` stripped — comes first, as
+  a single tag, so `timew summary` reads as a list of tasks
+- `dooing` is the always-on tag from `timewarrior.tags`
+- `myproject` is the per-project list name (global todos add no project tag)
+- `timew` and `work` are the todo's own `#tags`
+
+Priority names can be added too with `include_priorities = true`, and any of these
+sources can be switched off:
+
+```lua
+timewarrior = {
+    enabled = true,
+    command = "timew",          -- binary name or absolute path
+    tags = { "dooing" },        -- `false` adds no fixed tags at all
+    include_project = true,
+    include_hashtags = true,
+    include_priorities = false,
+    stop_on_delete = true,
+    single_active = true,
+},
+```
+
+Because `vim.tbl_deep_extend` merges lists by index, `tags = {}` does **not**
+clear the default — use `tags = false`.
+
+### One task at a time
+
+Timewarrior tracks a single open interval, so with `single_active = true` (the
+default) starting a todo stops any other todo that was still in progress: the
+first one drops back to pending and its interval is closed. Set
+`single_active = false` to let several todos be in progress at once — timewarrior
+will then reassign the clock to whichever one you started last, and the earlier
+todos keep their in-progress icon without accruing time.
+
+### Notes
+
+- Closing the todo window or quitting Neovim does **not** stop the clock; that is
+  deliberate, since the interval belongs to timewarrior, not to the editor.
+  Stop it with `x` on the todo, or `timew stop` from a shell.
+- Editing a tracked todo's text does not re-tag its interval. Dooing remembers the
+  tags it opened the interval with, so the eventual stop still matches — but only
+  within the session that started it.
+- Starting and finishing a todo inside the same second produces no interval:
+  timewarrior rejects a zero-length one, so dooing runs `timew cancel` rather than
+  leaving the clock running.
+- Restoring a deleted todo with `u` does not restart its interval.
+
+### Custom hooks
+
+The same two events are available to your own config, whether or not the
+timewarrior integration is on:
+
+```lua
+require("dooing").setup({
+    hooks = {
+        -- reason is always "start"
+        on_start = function(todo, context, reason)
+            vim.notify("started " .. todo.text .. " in " .. (context.project or "global"))
+        end,
+        -- reason is "done", "switch" (stopped by single_active) or "delete"
+        on_stop = function(todo, context, reason)
+            vim.notify("stopped " .. todo.text .. " (" .. reason .. ")")
+        end,
+    },
+})
 ```
 
 ---
